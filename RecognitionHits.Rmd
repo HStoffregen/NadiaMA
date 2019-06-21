@@ -1,0 +1,548 @@
+---
+title: "Recognition Hits - IN"
+author: "Hanna Stoffregen"
+date: "23 Mai 2018"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+```
+
+# Prepare workspace and data
+
+```{r}
+#clears workspace:  
+#rm(list=ls(all=TRUE))  
+```
+```{r}
+## Functions 
+
+### write function to detach all packages to avoid interferences
+detachAllPackages <- function() { 
+  #store basic packages names in a list
+  basic.packages <- c("package:stats","package:graphics","package:grDevices","package:utils","package:dataSets","package:methods","package:base")  
+  #make list of all loaded packages
+  package.list <- search()[ifelse(unlist(gregexpr("package:",search()))==1,TRUE,FALSE)]
+  #remove basic packages from the list
+  package.list <- setdiff(package.list,basic.packages)
+  #remove all packages from the list
+  if (length(package.list)>0)  for (package in package.list) detach(package, character.only=TRUE)
+}
+### write function to detect outliers for boxplots
+is_outlier <- function(x) {
+  return(x < quantile(x, 0.25) - 1.5 * IQR(x) | x > quantile(x, 0.75) + 1.5 * IQR(x))
+}
+```
+```{r}
+## Load required libraries
+library(ggplot2)
+library(glmm)
+library(lme4)
+library(reshape2)
+library(plyr)
+library(dplyr)
+library(foreign)
+library(ez)
+library(pastecs)
+library(knitr)
+library(ggpubr)
+```
+```{r}
+## Data collection and preparation
+#save path to main directory
+path="C:/Users/BAN7836/Documents/NadiaMA/DataAnalysis"
+#change working directory to data directory
+setwd(paste(path,"/Data", sep=""))
+#read in spss file and create data set
+dataSet  <-  read.spss("MA_Nadia_Ramos_1800508_ALL_DATA_Hanna.sav", to.data.frame=T)
+```
+```{r}
+### data exclusion
+#exclude subjects (see exclusion criteria Nadia)
+df <- dataSet[!(dataSet$vpn %in% c(3,6,17,20,41,64,73)), ]
+```
+```{r}
+### data preparation
+#melt dataframe for TimeToFirstFixation + make three seperate variables for picture group number (1-9), order (6 possible), TypeOfInterest (which pictureType A, B or C the TTFF refers to)
+dummyDf <- melt(df, measure.vars = c(27:132), variable.name = "pictureType", value.name = "TTFF")
+dummyDf$Picture <- substr(dummyDf$pictureType,21,21)
+dummyDf$Order <- substr(dummyDf$pictureType,22,23)
+dummyDf$Type <- substr(dummyDf$pictureType, 29,29)
+dummyDf$Picture <- as.factor(dummyDf$Picture)
+dummyDf$Order <- as.factor(dummyDf$Order)
+dummyDf$Type <- as.factor(dummyDf$Type)
+
+#extract FixationDurationData
+FixDura <- df[, c(1, 133:238)]
+#melt dataframe for FixationDuration
+FixDura <- melt(FixDura, measure.vars = c(2:107), variable.name = "pictureType1", value.name = "FixationDuration")
+FixDura$Picture <- substr(FixDura$pictureType,18,18)
+FixDura$Order <- substr(FixDura$pictureType,19,20)
+FixDura$Type <- substr(FixDura$pictureType, 26,26)
+FixDura$Picture <- as.factor(FixDura$Picture)
+FixDura$Order <- as.factor(FixDura$Order)
+FixDura$Type <- as.factor(FixDura$Type)
+
+
+#extract FixationCount
+FixCount <- df[, c(1, 239:344)]
+#melt dataframe for FixationCount
+FixCount <- melt(FixCount, measure.vars = c(2:107), variable.name = "pictureType2", value.name = "FixationCount")
+FixCount$Picture <- substr(FixCount$pictureType,15,15)
+FixCount$Order <- substr(FixCount$pictureType,16,17)
+FixCount$Type <- substr(FixCount$pictureType, 23,23)
+FixCount$Picture <- as.factor(FixCount$Picture)
+FixCount$Order <- as.factor(FixCount$Order)
+FixCount$Type <- as.factor(FixCount$Type)
+
+df <- merge(dummyDf, FixDura)
+df <- merge(df, FixCount)
+
+#rename factor Type and relevel so that X is reference
+df$Type <- mapvalues(df$Type, from = c("g", "n", "o"), to = c("A", "X","B"))
+df$Type <- relevel(df$Type, ref="B")
+
+# relevel bedingung, so that MC is referene
+df$bedingung <- mapvalues(df$bedingung, from = c("Indulging", "MC"), to = c("IN", "MC"))
+
+df$bedingung <- relevel(df$bedingung, ref="IN")
+
+
+
+# create dataframe with only relevant data
+df <- df[,c(1:4,6,10:11,28,588,590,592,587,570:574)]
+df$pictureType <- gsub("TimetoFirstFixation_", "", df$pictureType)
+df$pictureType <- gsub("_Mean", "", df$pictureType)
+df$pictureType <- gsub(".jpg", "", df$pictureType)
+
+# create an attention score with FixationDuration
+dummyDf <- df[!is.na(df$FixationDuration),]
+dummyAttention <- dummyDf %>% group_by(vpn) %>% summarize(attention = sum(FixationDuration))
+
+#attach attention variable to df
+df <- merge(df, dummyAttention, by = "vpn")
+
+#include Memory scores (free recall and recognition)
+
+df$recallCount <- NA
+df[df$Type == "A",]$recallCount <- df[df$Type == "A",]$FANTASIEREL
+df[df$Type == "B",]$recallCount <- df[df$Type == "B",]$HINDERNISREL
+df[df$Type == "X",]$recallCount <- df[df$Type == "X",]$NEUTRAL
+
+df$recognition <- NA
+df[df$Type == "A",]$recognition <- df[df$Type == "A",]$Recog_Fantasie
+df[df$Type == "B",]$recognition <- df[df$Type == "B",]$Recog_Hindernis
+
+df <- within(df, rm("FANTASIEREL", "HINDERNISREL", "NEUTRAL", "Recog_Fantasie", "Recog_Hindernis"))
+
+#for recognition remove nas
+df <- df[!is.na(df$recognition),]
+
+
+# DERIVATIVE DATAFRAMES OF DF (dfDiff for difference scores, dfLM and dfDiffLM for linear models)
+
+#create new df that contains difference scores (A-X, B-X, A-B) rather single scores
+dfDiff <- dcast(df,  vpn+Picture+Order+bedingung+erwartung+anreiz+commitment+attention ~ Type, value.var = "recognition", mean)
+dfDiff$A[is.nan(dfDiff$A)] <- NA
+dfDiff$B[is.nan(dfDiff$B)] <- NA
+
+dfDiff$AB <- dfDiff$A - dfDiff$B
+
+dfDiff <- melt(dfDiff, measure.vars = c(9:10), variable.name = "DiffScore", value.name = "recognition")
+#rename Order
+dfDiff$Order <- mapvalues(dfDiff$Order, from = c("AX", "XA", "BX", "XB", "AB", "BA"), to = c("minLeft", "minRight","minLeft", "minRight", "minLeft", "minRight"))
+#delete unnecesarry variables
+#dfDiff <- dfDiff[,-c(9:11)]
+
+# create dfLM for linear models on single scores with centralized moderators (on mean)
+# centralize all moderators in dfLM
+
+dfLM <- df
+manreiz <- mean(dfLM$anreiz, na.rm=TRUE)
+merwartung <- mean(dfLM$erwartung, na.rm=TRUE)
+mcommitment <- mean(dfLM$commitment, na.rm=TRUE)
+mattention <- mean(dfLM$attention, na.rm=TRUE)
+
+dfLM$anreiz <- dfLM$anreiz - manreiz
+dfLM$erwartung <- dfLM$erwartung - merwartung
+dfLM$commitment <- dfLM$commitment - mcommitment
+dfLM$attention <- dfLM$attention - mattention
+
+# create dfDiff for linear models on difference scores with centralized moderators (on mean)
+
+# centralize moderators in df Diff
+
+dfDiffLM <- dfDiff
+manreiz <- mean(dfDiffLM$anreiz, na.rm=TRUE)
+merwartung <- mean(dfDiffLM$erwartung, na.rm=TRUE)
+mcommitment <- mean(dfDiffLM$commitment, na.rm=TRUE)
+mattention <- mean(dfDiffLM$attention, na.rm=TRUE)
+
+dfDiffLM$anreiz <- dfDiffLM$anreiz - manreiz
+dfDiffLM$erwartung <- dfDiffLM$erwartung - merwartung
+dfDiffLM$commitment <- dfDiffLM$commitment - mcommitment
+dfDiffLM$attention <- dfDiffLM$attention - mattention
+```
+```{r}
+# Settings
+# name y axis for graphs
+
+xname = "Number of Hits"
+xnameDiff = "DiffScore Number of Hits\n (positive values = more hits for minuend)"
+
+```
+
+# Data Exploration/Outlier Detection
+
+## Single Scores
+
+### Scatterplot for single scores for individual pictures (1-9)
+
+```{r, fig.width=15, fig.height = 6}
+Graph <- df
+Graph <- Graph[!is.na(Graph$recognition),]
+
+Graph <- Graph %>%
+    group_by(vpn, bedingung, Type) %>%
+    summarise(mean.recognition = mean(recognition), sd.recognition = sd(recognition), se.recognition = sd(recognition)/sqrt(n()), n=n()) 
+
+gp <- ggplot(data = Graph,
+             aes(x=vpn, y=mean.recognition, colour=bedingung))
+#set points
+gp <- gp + geom_point()
+gp <- gp + facet_wrap(~Type)
+#set x-axis label
+gp <- gp + xlab("Subject")
+#set y-axis label
+gp <- gp + ylab(xname)
+#legend
+gp <- gp + theme(legend.position = "bottom", legend.direction="horizontal")
+#show plot
+gp
+```
+
+### Boxplot: detect outlier picture groups
+
+```{r}
+
+Graph <- Graph %>%
+  group_by(vpn, bedingung, Type) %>%
+  mutate(outlier = ifelse(is_outlier(mean.recognition),vpn, as.numeric(NA))) 
+
+```
+```{r, fig.width = 12}
+gp <- ggplot(data = Graph,
+             aes(x=Type, y=mean.recognition, colour=bedingung))
+#set points
+gp <- gp + geom_boxplot()
+gp <- gp + geom_text(aes(label = outlier), na.rm = TRUE, hjust = -0.3)
+#set colour
+gp <- gp + scale_color_discrete(name="bedingung")
+gp <- gp + scale_colour_manual(values=c("red","dark blue"))
+#set x-axis label
+gp <- gp + xlab("Type")
+#set y-axis label
+gp <- gp + ylab(xname)
+#legend
+gp <- gp + theme(legend.position = "bottom", legend.direction="horizontal")
+#set title
+gp <- gp + ggtitle(paste("Outlier Subjects for Condition"))
+#show plot
+gp
+```
+
+### Scatterplot: check difference scores for all subjects
+
+```{r, fig.width=12, fig.height=9}
+Graph <- dfDiff
+Graph <- Graph[!is.na(Graph$recognition),]
+
+Graph <- Graph %>%
+    group_by(vpn, bedingung, DiffScore) %>%
+    summarise(mean.recognition = mean(recognition), sd.recognition = sd(recognition), se.recognition = sd(recognition)/sqrt(n()), n=n())
+
+gp <- ggplot(data = Graph,
+             aes(x=vpn, y=mean.recognition, colour=bedingung))
+#set points
+gp <- gp + geom_point()
+gp <- gp + facet_wrap(~DiffScore)
+#set colour
+gp <- gp + scale_color_discrete(name="bedingung")
+gp <- gp + scale_colour_manual(values=c("red","dark blue"))
+#set x-axis label
+gp <- gp + xlab("subject")
+#set y-axis label
+gp <- gp + ylab(xnameDiff)
+#legend
+gp <- gp + theme(legend.position = "bottom", legend.direction="horizontal")
+#gp <- gp + ggtitle(paste("Pulse at TSST for each Pps"))
+#show plot
+gp
+```
+
+### Boxplot: detect outlier picture groups
+
+```{r}
+
+Graph <- Graph %>%
+  group_by(vpn, bedingung, DiffScore) %>%
+  mutate(outlier = ifelse(is_outlier(mean.recognition),vpn, as.numeric(NA))) 
+
+```
+```{r, fig.width = 12}
+gp <- ggplot(data = Graph,
+             aes(x=DiffScore, y=mean.recognition, colour=bedingung))
+#set points
+gp <- gp + geom_boxplot()
+gp <- gp + geom_text(aes(label = outlier), na.rm = TRUE, hjust = -0.3)
+#set colour
+gp <- gp + scale_color_discrete(name="bedingung")
+gp <- gp + scale_colour_manual(values=c("red","dark blue"))
+#set x-axis label
+gp <- gp + xlab("Order")
+#set y-axis label
+gp <- gp + ylab(xnameDiff)
+#legend
+gp <- gp + theme(legend.position = "bottom", legend.direction="horizontal")
+#show plot
+gp
+```
+
+# Data Analysis with single scores
+
+## simple spearman correlations (Anreiz, Erwartung, Commitment, Attention)
+
+```{r, fig.width = 12, fig.height = 6}
+
+gp <- ggplot(df, aes(anreiz, recognition, colour=bedingung))
+#set scatter plot
+gp <- gp + geom_point()
+gp <- gp + geom_smooth(method = "lm", aes(fill=bedingung), alpha = 0.1)
+#set colour
+gp <- gp + scale_color_discrete(name="bedingung")
+gp <- gp + scale_colour_manual(values=c("red","dark blue"))
+gp <- gp + scale_fill_discrete(name="bedingung")
+gp <- gp + scale_fill_manual(values=c("red","dark blue"))
+gp <- gp+facet_wrap(~Type)
+gp <- gp + stat_cor(method = "spearman")
+gp <- gp + theme(legend.position = "bottom", legend.direction="horizontal")
+gp <- gp + labs(x = "Anreiz", y=xname)
+gp <- gp + theme_minimal() 
+gp
+
+gp <- ggplot(df, aes(commitment, recognition, colour=bedingung))
+#set scatter plot
+gp <- gp + geom_point()
+gp <- gp + geom_smooth(method = "lm", aes(fill=bedingung), alpha = 0.1)
+#set colour
+gp <- gp + scale_color_discrete(name="bedingung")
+gp <- gp + scale_colour_manual(values=c("red","dark blue"))
+gp <- gp + scale_fill_discrete(name="bedingung")
+gp <- gp + scale_fill_manual(values=c("red","dark blue"))
+gp <- gp+facet_wrap(~Type)
+gp <- gp + stat_cor(method = "spearman")
+gp <- gp + theme(legend.position = "bottom", legend.direction="horizontal")
+gp <- gp + labs(x = "Commitment", y=xname)
+gp <- gp + theme_minimal() 
+gp
+
+gp <- ggplot(df, aes(erwartung, recognition, colour=bedingung))
+#set scatter plot
+gp <- gp + geom_point()
+gp <- gp + geom_smooth(method = "lm", aes(fill=bedingung), alpha = 0.1)
+#set colour
+gp <- gp + scale_color_discrete(name="bedingung")
+gp <- gp + scale_colour_manual(values=c("red","dark blue"))
+gp <- gp + scale_fill_discrete(name="bedingung")
+gp <- gp + scale_fill_manual(values=c("red","dark blue"))
+gp <- gp+facet_wrap(~Type)
+gp <- gp + stat_cor(method = "spearman")
+gp <- gp + theme(legend.position = "bottom", legend.direction="horizontal")
+gp <- gp + labs(x = "Erwartung", y=xname)
+gp <- gp + theme_minimal() 
+gp
+
+gp <- ggplot(df, aes(attention, recognition, colour=bedingung))
+#set scatter plot
+gp <- gp + geom_point()
+gp <- gp + geom_smooth(method = "lm", aes(fill=bedingung), alpha = 0.1)
+#set colour
+gp <- gp + scale_color_discrete(name="bedingung")
+gp <- gp + scale_colour_manual(values=c("red","dark blue"))
+gp <- gp + scale_fill_discrete(name="bedingung")
+gp <- gp + scale_fill_manual(values=c("red","dark blue"))
+gp <- gp+facet_wrap(~Type)
+gp <- gp + stat_cor(method = "spearman")
+gp <- gp + theme(legend.position = "bottom", legend.direction="horizontal")
+gp <- gp + labs(x = "Attention", y=xname)
+gp <- gp + theme_minimal() 
+gp
+```
+
+## GLM with Bedingung + Type - Poisson Distribution
+
+```{r}
+dfLM$recognition[is.nan(dfLM$recognition)] <- NA
+dfLM <- dfLM[!is.na(dfLM$recognition),]
+model2 <- glm(recognition ~ bedingung*Type, family = poisson(), data=dfLM)
+
+summary(model2)
+```
+
+- In less hits for B than MC
+- Type A less hits than for B in MC
+- IN: (relevelled model)
+
+## GLM Moderator Analysis
+
+### Anreiz
+
+```{r}
+model2 <- glm(recognition ~ bedingung*Type*anreiz, family=poisson(), data=dfLM)
+summary(model2)
+```
+
+- anreiz --> less B recall for MC and IN
+- anreiz has a different effect for A in IN compared to MC (relevelled model: )
+
+### Commitment
+
+```{r}
+model2 <- glm(recognition ~ bedingung*Type*commitment, family=poisson(), data=dfLM)
+summary(model2)
+
+```
+
+- commitment negative relationship to hits for B in MC
+- less negative for IN (relevelled model: 
+- for IN commitment has a significantly different effect on A than in MC (relevelled model:)
+
+### Erwartung
+
+```{r}
+model2 <- glm(recognition ~ bedingung*Type*erwartung, family=poisson(), data=dfLM)
+summary(model2)
+```
+
+- in MC erwartung is negatively correlated with A hits
+- for IN this is positive (relevelled model: )
+
+### Attention
+
+```{r}
+model2 <- glm(recognition ~ bedingung*Type*attention, family=poisson(), data=dfLM)
+summary(model2)
+```
+
+- attention positive correlation for MC/B and MC/A (which is not different from B)
+- less positive in IN (relevelled model) also for A and B (relevelled model)
+
+# Data Analysis with DiffScores
+
+## Line Graphs Displaying spearman Correlations
+
+```{r, fig.width = 12, fig.height = 6}
+
+gp <- ggplot(dfDiff, aes(anreiz, recognition, colour=bedingung))
+#set scatter plot
+gp <- gp + geom_point()
+gp <- gp + geom_smooth(method = "lm", aes(fill=bedingung), alpha = 0.1)
+#set colour
+gp <- gp + scale_color_discrete(name="bedingung")
+gp <- gp + scale_colour_manual(values=c("red","dark blue"))
+gp <- gp + scale_fill_discrete(name="bedingung")
+gp <- gp + scale_fill_manual(values=c("red","dark blue"))
+gp <- gp + stat_cor(method = "spearman")
+gp <- gp + theme(legend.position = "bottom", legend.direction="horizontal")
+gp <- gp + labs(x = "Anreiz", y=xname)
+gp <- gp + theme_minimal() 
+gp
+
+gp <- ggplot(dfDiff, aes(commitment, recognition, colour=bedingung))
+#set scatter plot
+gp <- gp + geom_point()
+gp <- gp + geom_smooth(method = "lm", aes(fill=bedingung), alpha = 0.1)
+#set colour
+gp <- gp + scale_color_discrete(name="bedingung")
+gp <- gp + scale_colour_manual(values=c("red","dark blue"))
+gp <- gp + scale_fill_discrete(name="bedingung")
+gp <- gp + scale_fill_manual(values=c("red","dark blue"))
+gp <- gp + stat_cor(method = "spearman")
+gp <- gp + theme(legend.position = "bottom", legend.direction="horizontal")
+gp <- gp + labs(x = "Commitment", y=xname)
+gp <- gp + theme_minimal() 
+gp
+
+gp <- ggplot(dfDiff, aes(erwartung, recognition, colour=bedingung))
+#set scatter plot
+gp <- gp + geom_point()
+gp <- gp + geom_smooth(method = "lm", aes(fill=bedingung), alpha = 0.1)
+#set colour
+gp <- gp + scale_color_discrete(name="bedingung")
+gp <- gp + scale_colour_manual(values=c("red","dark blue"))
+gp <- gp + scale_fill_discrete(name="bedingung")
+gp <- gp + scale_fill_manual(values=c("red","dark blue"))
+gp <- gp + stat_cor(method = "spearman")
+gp <- gp + theme(legend.position = "bottom", legend.direction="horizontal")
+gp <- gp + labs(x = "Erwartung", y=xname)
+gp <- gp + theme_minimal() 
+gp
+
+gp <- ggplot(dfDiff, aes(attention, recognition, colour=bedingung))
+#set scatter plot
+gp <- gp + geom_point()
+gp <- gp + geom_smooth(method = "lm", aes(fill=bedingung), alpha = 0.1)
+#set colour
+gp <- gp + scale_color_discrete(name="bedingung")
+gp <- gp + scale_colour_manual(values=c("red","dark blue"))
+gp <- gp + scale_fill_discrete(name="bedingung")
+gp <- gp + scale_fill_manual(values=c("red","dark blue"))
+gp <- gp + stat_cor(method = "spearman")
+gp <- gp + theme(legend.position = "bottom", legend.direction="horizontal")
+gp <- gp + labs(x = "Attention", y=xname)
+gp <- gp + theme_minimal() 
+gp
+```
+
+## LM with Anreiz, Erwartung, Commitment, Attention on DiffScores
+
+### Fantasy - Obstacle
+
+```{r}
+dfDiffLM$AB[is.nan(dfDiffLM$AB)] <- NA
+
+model <- lm(AB ~ bedingung + Order, data=dfDiffLM)
+model1 <- lm(AB ~ bedingung*Order*anreiz, data=dfDiffLM)
+model2 <- lm(AB ~ bedingung*Order*erwartung, data=dfDiffLM)
+model3 <- lm(AB ~ bedingung*Order*commitment, data=dfDiffLM)
+model4 <- lm(AB ~ bedingung*Order*attention, data=dfDiffLM)
+
+summary(model)
+```
+
+#### Anreiz
+
+```{r}
+summary(model1)
+```
+
+#### Erwartung
+
+```{r}
+summary(model2)
+```
+
+#### Commitment
+
+```{r}
+summary(model3)
+```
+
+#### Attention
+
+```{r}
+summary(model4)
+```

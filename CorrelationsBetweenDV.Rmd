@@ -1,0 +1,498 @@
+---
+title: "Correlations between DVs and Moderators"
+author: "Hanna Stoffregen"
+date: "28 Mai 2018"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+```
+
+# Prepare workspace and data
+
+- **moderator attention:** is calculated using total looking time duration for each subject over entire experimental session
+- **moderator free recall and hits (recognition):** are calculated using subject's total score over all picture types
+
+```{r}
+#clears workspace:  
+#rm(list=ls(all=TRUE))  
+```
+```{r}
+## Functions 
+
+### write function to detach all packages to avoid interferences
+detachAllPackages <- function() { 
+  #store basic packages names in a list
+  basic.packages <- c("package:stats","package:graphics","package:grDevices","package:utils","package:dataSets","package:methods","package:base")  
+  #make list of all loaded packages
+  package.list <- search()[ifelse(unlist(gregexpr("package:",search()))==1,TRUE,FALSE)]
+  #remove basic packages from the list
+  package.list <- setdiff(package.list,basic.packages)
+  #remove all packages from the list
+  if (length(package.list)>0)  for (package in package.list) detach(package, character.only=TRUE)
+}
+### write function to detect outliers for boxplots
+is_outlier <- function(x) {
+  return(x < quantile(x, 0.25) - 1.5 * IQR(x) | x > quantile(x, 0.75) + 1.5 * IQR(x))
+}
+```
+```{r}
+## Load required libraries
+library(ggplot2)
+library(glmm)
+library(lme4)
+library(reshape2)
+library(plyr)
+library(dplyr)
+library(foreign)
+library(ez)
+library(pastecs)
+library(knitr)
+library(ggpubr)
+```
+```{r}
+## Data collection and preparation
+#save path to main directory
+path="C:/Users/BAN7836/Documents/NadiaMA/DataAnalysis"
+#change working directory to data directory
+setwd(paste(path,"/Data", sep=""))
+#read in spss file and create data set
+dataSet  <-  read.spss("MA_Nadia_Ramos_1800508_ALL_DATA_Hanna.sav", to.data.frame=T)
+```
+```{r, settings for dataframe creation}
+#should within subjects variables be adjusted?
+adjust <- FALSE
+#should scores be related to group mean?
+relateScores <- FALSE
+#for lm: define reference group
+ref <- "MC"
+```
+```{r, exclude subjects}
+### data exclusion
+#exclude subjects (see exclusion criteria Nadia)
+df <- dataSet[!(dataSet$vpn %in% c(3,6,17,20,41,64,73)), ]
+```
+```{r, prepare data}
+### data preparation
+#melt dataframe for TimeToFirstFixation + make three seperate variables for picture group number (1-9), order (6 possible), TypeOfInterest (which pictureType A, B or C the TTFF refers to)
+dummyDf <- melt(df, measure.vars = c(27:132), variable.name = "pictureType", value.name = "TTFF")
+dummyDf$Picture <- substr(dummyDf$pictureType,21,21)
+dummyDf$Order <- substr(dummyDf$pictureType,22,23)
+dummyDf$Type <- substr(dummyDf$pictureType, 29,29)
+dummyDf$Picture <- as.factor(dummyDf$Picture)
+dummyDf$Order <- as.factor(dummyDf$Order)
+dummyDf$Type <- as.factor(dummyDf$Type)
+
+#extract FixationDurationData
+FixDura <- df[, c(1, 133:238)]
+#melt dataframe for FixationDuration
+FixDura <- melt(FixDura, measure.vars = c(2:107), variable.name = "pictureType1", value.name = "FixationDuration")
+FixDura$Picture <- substr(FixDura$pictureType,18,18)
+FixDura$Order <- substr(FixDura$pictureType,19,20)
+FixDura$Type <- substr(FixDura$pictureType, 26,26)
+FixDura$Picture <- as.factor(FixDura$Picture)
+FixDura$Order <- as.factor(FixDura$Order)
+FixDura$Type <- as.factor(FixDura$Type)
+
+
+#extract FixationCount
+FixCount <- df[, c(1, 239:344)]
+#melt dataframe for FixationCount
+FixCount <- melt(FixCount, measure.vars = c(2:107), variable.name = "pictureType2", value.name = "FixationCount")
+FixCount$Picture <- substr(FixCount$pictureType,15,15)
+FixCount$Order <- substr(FixCount$pictureType,16,17)
+FixCount$Type <- substr(FixCount$pictureType, 23,23)
+FixCount$Picture <- as.factor(FixCount$Picture)
+FixCount$Order <- as.factor(FixCount$Order)
+FixCount$Type <- as.factor(FixCount$Type)
+
+df <- merge(dummyDf, FixDura)
+df <- merge(df, FixCount)
+
+#rename factor Type and relevel so that X is reference
+df$Type <- mapvalues(df$Type, from = c("g", "n", "o"), to = c("A", "X","B"))
+df$Type <- relevel(df$Type, ref="B")
+
+# relevel bedingung, so that MC is referene
+df$bedingung <- mapvalues(df$bedingung, from = c("Indulging", "MC"), to = c("IN", "MC"))
+
+if (ref == "MC"){
+  df$bedingung <- relevel(df$bedingung, ref="MC")
+} else if (ref=="IN"){
+  df$bedingung <- relevel(df$bedingung, ref="IN")
+}
+
+# create dataframe with only relevant data
+df <- df[,c(1:4,6,10:11,28,588,590,592, 587, 570:574)]
+df$pictureType <- gsub("TimetoFirstFixation_", "", df$pictureType)
+df$pictureType <- gsub("_Mean", "", df$pictureType)
+df$pictureType <- gsub(".jpg", "", df$pictureType)
+
+#create attention score
+dummyDf <- df[!is.na(df$FixationDuration),]
+dummyAttention <- dummyDf %>% group_by(vpn) %>% summarize(attention = sum(FixationDuration))
+df <- merge(df, dummyAttention, by = "vpn")
+#create free recall score
+df$freeRecall <- df$FANTASIEREL + df$HINDERNISREL + df$NEUTRAL
+#create hit score
+df$Hits <- df$Recog_Fantasie + df$Recog_Hindernis
+
+#remove recall variables to keep column indices the same
+df <- df[, -c(13:17)]
+
+#adjust variables and relate to total score of vp
+
+df$grandMean <- NA
+df[c(df$bedingung=="MC"),]$grandMean <- mean(df[c(df$bedingung=="MC"),]$FixationDuration, na.rm=T)
+df[c(df$bedingung=="IN"),]$grandMean <- mean(df[c(df$bedingung=="IN"),]$FixationDuration, na.rm=T)
+df$pMean <- NA
+
+for (i in c(unique(df$vpn))){
+  df[c(df$vpn==i),]$pMean <- mean(df[c(df$vpn==i),]$FixationDuration, na.rm=T)
+}
+df$adj <- df$grandMean - df$pMean
+
+if (adjust == TRUE){
+  df$FixationDuration <- df$FixationDuration - df$adj
+}
+
+#relate scores to mean in group
+if (relateScores == TRUE){
+ df$FixationDuration <- df$FixationDuration/df$grandMean
+}
+
+#delete dummy variables
+df <- df[,-c(16:18)]
+
+# DERIVATIVE DATAFRAMES OF DF (dfDiff for difference scores, dfLM and dfDiffLM for linear models)
+
+#create new df that contains difference scores (A-X, B-X, A-B) rather than single scores
+dfDiff <- dcast(df,  vpn+Picture+Order+bedingung+erwartung+anreiz+commitment+attention+freeRecall+Hits ~ Type, value.var = "FixationDuration", mean)
+dfDiff$A[is.nan(dfDiff$A_fantasy)] <- NA
+dfDiff$B[is.nan(dfDiff$B_obstacle)] <- NA
+dfDiff$X[is.nan(dfDiff$X_neutral)] <- NA
+
+dfDiff$Ax <- dfDiff$A - dfDiff$X
+dfDiff$Bx <- dfDiff$B - dfDiff$X
+dfDiff$AB <- dfDiff$A - dfDiff$B
+
+dfDiff <- melt(dfDiff, measure.vars = c(14:16), variable.name = "DiffScore", value.name = "FixationDuration")
+#rename Order
+dfDiff$Order <- mapvalues(dfDiff$Order, from = c("AX", "XA", "BX", "XB", "AB", "BA"), to = c("minLeft", "minRight","minLeft", "minRight", "minLeft", "minRight"))
+#delete unnecesarry variables
+dfDiff <- dfDiff[,-c(11:13)]
+
+# create dfLM for linear models on single scores with centralized moderators (on mean)
+# centralize all moderators in dfLM
+
+dfLM <- df
+manreiz <- mean(dfLM$anreiz, na.rm=TRUE)
+merwartung <- mean(dfLM$erwartung, na.rm=TRUE)
+mcommitment <- mean(dfLM$commitment, na.rm=TRUE)
+mattention <- mean(dfLM$attention, na.rm=TRUE)
+mfreeRecall <- mean(dfLM$freeRecall, na.rm=TRUE)
+mHits <- mean(df$Hits, na.rm=TRUE)
+
+dfLM$anreiz <- dfLM$anreiz - manreiz
+dfLM$erwartung <- dfLM$erwartung - merwartung
+dfLM$commitment <- dfLM$commitment - mcommitment
+dfLM$attention <- dfLM$attention - mattention
+dfLM$freeRecall <- dfLM$freeRecall - mfreeRecall
+dfLM$Hits <- dfLM$Hits - mHits
+# create dfDiff for linear models on difference scores with centralized moderators (on mean)
+
+# centralize moderators in df Diff
+
+dfDiffLM <- dfDiff
+manreiz <- mean(dfDiffLM$anreiz, na.rm=TRUE)
+merwartung <- mean(dfDiffLM$erwartung, na.rm=TRUE)
+mcommitment <- mean(dfDiffLM$commitment, na.rm=TRUE)
+mattention <- mean(dfDiffLM$attention, na.rm=TRUE)
+mfreeRecall <- mean(dfDiffLM$freeRecall, na.rm=TRUE)
+mHits <- mean(dfDiff$Hits, na.rm=TRUE)
+
+dfDiffLM$anreiz <- dfDiffLM$anreiz - manreiz
+dfDiffLM$erwartung <- dfDiffLM$erwartung - merwartung
+dfDiffLM$commitment <- dfDiffLM$commitment - mcommitment
+dfDiffLM$attention <- dfDiffLM$attention - mattention
+dfDiffLM$freeRecall <- dfDiffLM$freeRecall - mfreeRecall
+dfDiffLM$Hits <- dfDiffLM$Hits - mHits
+
+```
+```{r}
+# Settings
+# name y axis for graphs
+
+#xname = "Fixation Duration"
+#xnameDiff = "DiffScore Fixation Duration \n (positive values = minuend was looked at longer)"
+
+```
+
+# Correlations for A, B, and C
+
+```{r, fig.width = 12, fig.height = 6}
+gp <- ggplot(df, aes(FixationDuration, FixationCount, colour=bedingung))
+gp <- gp + geom_point()
+gp <- gp + geom_smooth(method = "lm", aes(fill=bedingung), alpha = 0.1)
+gp <- gp + scale_color_discrete(name="bedingung")
+gp <- gp + scale_colour_manual(values=c("red","dark blue"))
+gp <- gp + scale_fill_discrete(name="bedingung")
+gp <- gp + scale_fill_manual(values=c("red","dark blue"))
+gp <- gp+facet_wrap(~Type)
+gp <- gp + stat_cor(method = "pearson")
+gp <- gp + theme(legend.position = "bottom", legend.direction="horizontal")
+gp <- gp + labs(x = "Fixation Duration", y= "Fixation Count")
+gp <- gp + theme_minimal() 
+gp
+
+gp <- ggplot(df, aes(FixationDuration, TTFF, colour=bedingung))
+gp <- gp + geom_point()
+gp <- gp + geom_smooth(method = "lm", aes(fill=bedingung), alpha = 0.1)
+gp <- gp + scale_color_discrete(name="bedingung")
+gp <- gp + scale_colour_manual(values=c("red","dark blue"))
+gp <- gp + scale_fill_discrete(name="bedingung")
+gp <- gp + scale_fill_manual(values=c("red","dark blue"))
+gp <- gp+facet_wrap(~Type)
+gp <- gp + stat_cor(method = "pearson")
+gp <- gp + theme(legend.position = "bottom", legend.direction="horizontal")
+gp <- gp + labs(x = "Fixation Duration", y="Time to First Fixation")
+gp <- gp + theme_minimal() 
+gp
+
+gp <- ggplot(df, aes(FixationCount, TTFF, colour=bedingung))
+gp <- gp + scale_color_discrete(name="bedingung")
+gp <- gp + scale_colour_manual(values=c("red","dark blue"))
+gp <- gp + geom_point()
+gp <- gp + geom_smooth(method = "lm", aes(fill=bedingung), alpha = 0.1)
+gp <- gp + scale_color_discrete(name="bedingung")
+gp <- gp + scale_colour_manual(values=c("red","dark blue"))
+gp <- gp + scale_fill_discrete(name="bedingung")
+gp <- gp + scale_fill_manual(values=c("red","dark blue"))
+gp <- gp+facet_wrap(~Type)
+gp <- gp + stat_cor(method = "pearson")
+gp <- gp + theme(legend.position = "bottom", legend.direction="horizontal")
+gp <- gp + labs(x = "Fixation Count", y="Time to First Fixation")
+gp <- gp + theme_minimal() 
+gp
+
+```
+
+# Correlations between moderators (multicolinearity)
+
+```{r,  fig.width = 12, fig.height = 6}
+gp <- ggplot(df, aes(erwartung, anreiz, colour=bedingung))
+gp <- gp + geom_point()
+gp <- gp + geom_smooth(method = "lm", aes(fill=bedingung), alpha = 0.1)
+gp <- gp + scale_color_discrete(name="bedingung")
+gp <- gp + scale_colour_manual(values=c("red","dark blue"))
+gp <- gp + scale_fill_discrete(name="bedingung")
+gp <- gp + scale_fill_manual(values=c("red","dark blue"))
+gp <- gp+facet_wrap(~Type)
+gp <- gp + stat_cor(method = "spearman")
+gp <- gp + theme(legend.position = "bottom", legend.direction="horizontal")
+gp <- gp + labs(x = "Erwartung", y="Anreiz")
+gp <- gp + theme_minimal() 
+gp
+
+gp <- ggplot(df, aes(erwartung, commitment, colour=bedingung))
+gp <- gp + geom_point()
+gp <- gp + geom_smooth(method = "lm", aes(fill=bedingung), alpha = 0.1)
+gp <- gp + scale_color_discrete(name="bedingung")
+gp <- gp + scale_colour_manual(values=c("red","dark blue"))
+gp <- gp + scale_fill_discrete(name="bedingung")
+gp <- gp + scale_fill_manual(values=c("red","dark blue"))
+gp <- gp+facet_wrap(~Type)
+gp <- gp + stat_cor(method = "spearman")
+gp <- gp + theme(legend.position = "bottom", legend.direction="horizontal")
+gp <- gp + labs(x = "Erwartung", y="Commitment")
+gp <- gp + theme_minimal() 
+gp
+
+gp <- ggplot(df, aes(erwartung, attention, colour=bedingung))
+gp <- gp + geom_point()
+gp <- gp + geom_smooth(method = "lm", aes(fill=bedingung), alpha = 0.1)
+gp <- gp + scale_color_discrete(name="bedingung")
+gp <- gp + scale_colour_manual(values=c("red","dark blue"))
+gp <- gp + scale_fill_discrete(name="bedingung")
+gp <- gp + scale_fill_manual(values=c("red","dark blue"))
+gp <- gp+facet_wrap(~Type)
+gp <- gp + stat_cor(method = "spearman")
+gp <- gp + theme(legend.position = "bottom", legend.direction="horizontal")
+gp <- gp + labs(x = "Erwartung", y="Attention")
+gp <- gp + theme_minimal() 
+gp
+
+gp <- ggplot(df, aes(erwartung, freeRecall, colour=bedingung))
+gp <- gp + geom_point()
+gp <- gp + geom_smooth(method = "lm", aes(fill=bedingung), alpha = 0.1)
+gp <- gp + scale_color_discrete(name="bedingung")
+gp <- gp + scale_colour_manual(values=c("red","dark blue"))
+gp <- gp + scale_fill_discrete(name="bedingung")
+gp <- gp + scale_fill_manual(values=c("red","dark blue"))
+gp <- gp+facet_wrap(~Type)
+gp <- gp + stat_cor(method = "spearman")
+gp <- gp + theme(legend.position = "bottom", legend.direction="horizontal")
+gp <- gp + labs(x = "Erwartung", y="Free Recall")
+gp <- gp + theme_minimal() 
+gp
+
+gp <- ggplot(df, aes(erwartung, Hits, colour=bedingung))
+gp <- gp + geom_point()
+gp <- gp + geom_smooth(method = "lm", aes(fill=bedingung), alpha = 0.1)
+gp <- gp + scale_color_discrete(name="bedingung")
+gp <- gp + scale_colour_manual(values=c("red","dark blue"))
+gp <- gp + scale_fill_discrete(name="bedingung")
+gp <- gp + scale_fill_manual(values=c("red","dark blue"))
+gp <- gp+facet_wrap(~Type)
+gp <- gp + stat_cor(method = "spearman")
+gp <- gp + theme(legend.position = "bottom", legend.direction="horizontal")
+gp <- gp + labs(x = "Erwartung", y="Hits")
+gp <- gp + theme_minimal() 
+gp
+
+gp <- ggplot(df, aes(anreiz, commitment, colour=bedingung))
+gp <- gp + geom_point()
+gp <- gp + geom_smooth(method = "lm", aes(fill=bedingung), alpha = 0.1)
+gp <- gp + scale_color_discrete(name="bedingung")
+gp <- gp + scale_colour_manual(values=c("red","dark blue"))
+gp <- gp + scale_fill_discrete(name="bedingung")
+gp <- gp + scale_fill_manual(values=c("red","dark blue"))
+gp <- gp+facet_wrap(~Type)
+gp <- gp + stat_cor(method = "spearman")
+gp <- gp + theme(legend.position = "bottom", legend.direction="horizontal")
+gp <- gp + labs(x = "Anreiz", y="Commitment")
+gp <- gp + theme_minimal() 
+gp
+
+gp <- ggplot(df, aes(anreiz, attention, colour=bedingung))
+gp <- gp + geom_point()
+gp <- gp + geom_smooth(method = "lm", aes(fill=bedingung), alpha = 0.1)
+gp <- gp + scale_color_discrete(name="bedingung")
+gp <- gp + scale_colour_manual(values=c("red","dark blue"))
+gp <- gp + scale_fill_discrete(name="bedingung")
+gp <- gp + scale_fill_manual(values=c("red","dark blue"))
+gp <- gp+facet_wrap(~Type)
+gp <- gp + stat_cor(method = "spearman")
+gp <- gp + theme(legend.position = "bottom", legend.direction="horizontal")
+gp <- gp + labs(x = "Anreiz", y="Attention")
+gp <- gp + theme_minimal() 
+gp
+
+gp <- ggplot(df, aes(anreiz, freeRecall, colour=bedingung))
+gp <- gp + geom_point()
+gp <- gp + geom_smooth(method = "lm", aes(fill=bedingung), alpha = 0.1)
+gp <- gp + scale_color_discrete(name="bedingung")
+gp <- gp + scale_colour_manual(values=c("red","dark blue"))
+gp <- gp + scale_fill_discrete(name="bedingung")
+gp <- gp + scale_fill_manual(values=c("red","dark blue"))
+gp <- gp+facet_wrap(~Type)
+gp <- gp + stat_cor(method = "spearman")
+gp <- gp + theme(legend.position = "bottom", legend.direction="horizontal")
+gp <- gp + labs(x = "Anreiz", y="Free Recall")
+gp <- gp + theme_minimal() 
+gp
+
+gp <- ggplot(df, aes(anreiz, Hits, colour=bedingung))
+gp <- gp + geom_point()
+gp <- gp + geom_smooth(method = "lm", aes(fill=bedingung), alpha = 0.1)
+gp <- gp + scale_color_discrete(name="bedingung")
+gp <- gp + scale_colour_manual(values=c("red","dark blue"))
+gp <- gp + scale_fill_discrete(name="bedingung")
+gp <- gp + scale_fill_manual(values=c("red","dark blue"))
+gp <- gp+facet_wrap(~Type)
+gp <- gp + stat_cor(method = "spearman")
+gp <- gp + theme(legend.position = "bottom", legend.direction="horizontal")
+gp <- gp + labs(x = "Anreiz", y="Hits")
+gp <- gp + theme_minimal() 
+gp
+
+gp <- ggplot(df, aes(commitment, attention, colour=bedingung))
+gp <- gp + geom_point()
+gp <- gp + geom_smooth(method = "lm", aes(fill=bedingung), alpha = 0.1)
+gp <- gp + scale_color_discrete(name="bedingung")
+gp <- gp + scale_colour_manual(values=c("red","dark blue"))
+gp <- gp + scale_fill_discrete(name="bedingung")
+gp <- gp + scale_fill_manual(values=c("red","dark blue"))
+gp <- gp+facet_wrap(~Type)
+gp <- gp + stat_cor(method = "spearman")
+gp <- gp + theme(legend.position = "bottom", legend.direction="horizontal")
+gp <- gp + labs(x = "Commitment", y="Attention")
+gp <- gp + theme_minimal() 
+gp
+
+gp <- ggplot(df, aes(commitment, freeRecall, colour=bedingung))
+gp <- gp + geom_point()
+gp <- gp + geom_smooth(method = "lm", aes(fill=bedingung), alpha = 0.1)
+gp <- gp + scale_color_discrete(name="bedingung")
+gp <- gp + scale_colour_manual(values=c("red","dark blue"))
+gp <- gp + scale_fill_discrete(name="bedingung")
+gp <- gp + scale_fill_manual(values=c("red","dark blue"))
+gp <- gp+facet_wrap(~Type)
+gp <- gp + stat_cor(method = "spearman")
+gp <- gp + theme(legend.position = "bottom", legend.direction="horizontal")
+gp <- gp + labs(x = "Commitment", y="Free Recall")
+gp <- gp + theme_minimal() 
+gp
+
+gp <- ggplot(df, aes(commitment, Hits, colour=bedingung))
+gp <- gp + geom_point()
+gp <- gp + geom_smooth(method = "lm", aes(fill=bedingung), alpha = 0.1)
+gp <- gp + scale_color_discrete(name="bedingung")
+gp <- gp + scale_colour_manual(values=c("red","dark blue"))
+gp <- gp + scale_fill_discrete(name="bedingung")
+gp <- gp + scale_fill_manual(values=c("red","dark blue"))
+gp <- gp+facet_wrap(~Type)
+gp <- gp + stat_cor(method = "spearman")
+gp <- gp + theme(legend.position = "bottom", legend.direction="horizontal")
+gp <- gp + labs(x = "Commitment", y="Hits")
+gp <- gp + theme_minimal() 
+gp
+
+gp <- ggplot(df, aes(attention, freeRecall, colour=bedingung))
+gp <- gp + geom_point()
+gp <- gp + geom_smooth(method = "lm", aes(fill=bedingung), alpha = 0.1)
+gp <- gp + scale_color_discrete(name="bedingung")
+gp <- gp + scale_colour_manual(values=c("red","dark blue"))
+gp <- gp + scale_fill_discrete(name="bedingung")
+gp <- gp + scale_fill_manual(values=c("red","dark blue"))
+gp <- gp+facet_wrap(~Type)
+gp <- gp + stat_cor(method = "spearman")
+gp <- gp + theme(legend.position = "bottom", legend.direction="horizontal")
+gp <- gp + labs(x = "Attention", y="Free Recall")
+gp <- gp + theme_minimal() 
+gp
+
+gp <- ggplot(df, aes(attention, Hits, colour=bedingung))
+gp <- gp + geom_point()
+gp <- gp + geom_smooth(method = "lm", aes(fill=bedingung), alpha = 0.1)
+gp <- gp + scale_color_discrete(name="bedingung")
+gp <- gp + scale_colour_manual(values=c("red","dark blue"))
+gp <- gp + scale_fill_discrete(name="bedingung")
+gp <- gp + scale_fill_manual(values=c("red","dark blue"))
+gp <- gp+facet_wrap(~Type)
+gp <- gp + stat_cor(method = "spearman")
+gp <- gp + theme(legend.position = "bottom", legend.direction="horizontal")
+gp <- gp + labs(x = "Attention", y="Hits")
+gp <- gp + theme_minimal() 
+gp
+
+gp <- ggplot(df, aes(freeRecall, Hits, colour=bedingung))
+gp <- gp + geom_point()
+gp <- gp + geom_smooth(method = "lm", aes(fill=bedingung), alpha = 0.1)
+gp <- gp + scale_color_discrete(name="bedingung")
+gp <- gp + scale_colour_manual(values=c("red","dark blue"))
+gp <- gp + scale_fill_discrete(name="bedingung")
+gp <- gp + scale_fill_manual(values=c("red","dark blue"))
+gp <- gp+facet_wrap(~Type)
+gp <- gp + stat_cor(method = "spearman")
+gp <- gp + theme(legend.position = "bottom", legend.direction="horizontal")
+gp <- gp + labs(x = "Free Recall", y="Hits")
+gp <- gp + theme_minimal() 
+gp
+```
+
+
+
